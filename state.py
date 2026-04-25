@@ -3,9 +3,9 @@ import time
 
 # ── Human-in-the-loop approval rules ─────────────────────────────────────────
 APPROVAL_RULES = {
-    "confidence_threshold": 70,             # require approval below this %
-    "civilian_risk_levels": ["medium", "high"],  # require approval for these
-    "coverage_gap": True,                   # require approval if deployment creates a gap
+    "confidence_threshold": 60,          # below 60% confidence → human reviews
+    "civilian_risk_levels": ["high"],    # high civilian risk → human reviews
+    "coverage_gap": True,                # deployment creating a coverage gap → human reviews
 }
 
 pending_approvals = {}   # decision_id -> {decision, threat, reasons, created_at, ...}

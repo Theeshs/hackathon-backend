@@ -101,6 +101,8 @@ INCOMING THREAT:
   ETA to target: {threat.get('eta', '?')}s | Intended target: {threat.get('target_name', 'unknown')}
   Civilian traffic nearby: {threat.get('civilian_nearby', False)}
 
+{"⚠ CAPITAL UNDER THREAT — ARKTHOLM PRIORITY OVERRIDE: Arktholm is the capital (priority 10). Override ALL economy-of-force considerations. Deploy the FASTEST available intercept option regardless of cost. Set priority = immediate. Do not let fuel concerns, cost, or coverage gap calculations delay the intercept decision. Speed of response is paramount." if threat.get('target_name') == 'Arktholm' else f"Target priority: {next((t['priority'] for t in [dict(id='ARK',priority=10),dict(id='VLB',priority=6),dict(id='NDV',priority=6)] if t['id'] == threat.get('target_id')), 6)}/10 — apply economy-of-force normally"}
+
 BASE INTERCEPT ANALYSIS:
 {chr(10).join(base_lines)}
 {coverage_lines}
@@ -117,6 +119,16 @@ RESOURCE STATUS (inventory · fuel · warnings):
 {chr(10).join(resource_lines)}
 
 SESSION COSTS SO FAR: {session_cost_str}
+
+CONFIDENCE SCORING — be realistic, not optimistic. Start at 100 then subtract:
+- Another base within 20% of the recommended base's response time: -15 (viable alternative exists)
+- Any aircraft has fuel below 60%: -10 (degraded capability)
+- Civilian traffic nearby: -15 (engagement constraints)
+- Deployment creates a coverage gap: -20 (strategic risk)
+- 2 or more active threats simultaneously: -10 (resource contention)
+- Weapon is a suboptimal match for threat type: -10 (effectiveness uncertainty)
+- No clear single best option (multiple bases tied): -10
+Reserve 90–100% ONLY when there is a single unambiguous option with no alternatives, full fuel, no civilians, and no coverage risk. Most decisions should score 55–80%.
 
 Select the optimal base, asset type, AND weapon. Apply economy-of-force principles:
 
@@ -161,11 +173,17 @@ Respond ONLY with this JSON object:
 
 
 def build_forecast_prompt(wave_log: list, state_summary: dict) -> str:
+    from collections import Counter
+
     wave_lines = []
     for i, w in enumerate(wave_log[-10:], 1):
         age_min = round((w.get("now", w["time"]) - w["time"]) / 60000, 1) if "time" in w else "?"
+        targets_str = ", ".join(w.get("targets", []))
+        types_str   = ", ".join(w.get("types", [])) if w.get("types") else "unknown"
+        outcomes_str = ", ".join(w.get("outcomes", [])) if w.get("outcomes") else "unknown"
         wave_lines.append(
-            f"  Wave {i}: {w.get('count', '?')} threat(s) | targets: {', '.join(w.get('targets', []))} | {age_min} min ago"
+            f"  Wave {i}: {w.get('count', '?')} threats | targets: {targets_str} | "
+            f"types: {types_str} | outcomes: {outcomes_str} | {age_min} min ago"
         )
 
     intervals = []
@@ -174,33 +192,61 @@ def build_forecast_prompt(wave_log: list, state_summary: dict) -> str:
         intervals.append((times[i] - times[i - 1]) / 60000)
     avg_interval = round(sum(intervals) / len(intervals), 1) if intervals else None
 
+    # Derive attack pattern stats
+    all_targets = [t for w in wave_log for t in w.get("targets", [])]
+    all_types   = [t for w in wave_log for t in w.get("types", [])]
+    target_freq = Counter(all_targets).most_common()
+    type_freq   = Counter(all_types).most_common()
+    target_freq_str = ", ".join(f"{t}×{c}" for t, c in target_freq) if target_freq else "none"
+    type_freq_str   = ", ".join(f"{t}×{c}" for t, c in type_freq)   if type_freq   else "none"
+
+    escalation = "escalating" if len(wave_log) >= 2 and wave_log[-1].get("count", 0) > wave_log[0].get("count", 0) else \
+                 "de-escalating" if len(wave_log) >= 2 and wave_log[-1].get("count", 0) < wave_log[0].get("count", 0) else "stable"
+
     base_lines = "\n".join(
-        f"  {b['id']} ({b['name']}): {b['available_count']} aircraft ready, avg fuel ~{round(sum(a['fuel_pct'] for a in b['assets']) / max(len(b['assets']), 1))}%"
+        f"  {b['id']} ({b['name']}): {b['available_count']} aircraft ready, "
+        f"avg fuel ~{round(sum(a['fuel_pct'] for a in b['assets']) / max(len(b['assets']), 1))}%"
         for b in state_summary.get("bases", [])
     )
 
     return f"""You are a tactical air defense intelligence analyst for Northern Command.
 
-WAVE HISTORY (most recent last):
+WAVE HISTORY (most recent last, newest = wave {len(wave_log)}):
 {chr(10).join(wave_lines) if wave_lines else "  No waves recorded yet."}
 
-AVERAGE INTERVAL BETWEEN WAVES: {f"{avg_interval} min" if avg_interval else "insufficient data"}
+ATTACK PATTERN ANALYSIS:
+  Average interval between waves: {f"{avg_interval} min" if avg_interval else "insufficient data"}
+  Wave size trend: {escalation}
+  Target hit frequency: {target_freq_str}
+  Threat types used so far: {type_freq_str}
 
 CURRENT BASE READINESS:
 {base_lines}
 
-NORTH PROTECTION TARGETS: Arktholm (capital, priority 10), Valbrek (city, priority 6), Nordvik (city, priority 6)
+NORTH PROTECTION TARGETS:
+  Arktholm (capital, priority 10) — most valuable, likely primary target
+  Valbrek (major city, priority 6) — eastern flank
+  Nordvik (major city, priority 6) — western flank, near NVB
 
-Analyse the attack pattern and forecast the next wave. Consider: timing intervals, target preferences, escalation trends, and current base readiness gaps.
+INTELLIGENCE ASSESSMENT TASK:
+Based on the attack history above, reason as a tactical attacker:
+1. Which city has been hit least (lowest coverage, most vulnerable)?
+2. Which threat types caused the most damage or evaded intercept?
+3. Is this attacker escalating wave size, probing defenses, or focusing on one target?
+4. What would a rational attacker do next — repeat success or probe a new gap?
+
+Predict the SPECIFIC next attack: which city will be targeted, which threat type will be used,
+and how many threats in the wave. Be specific — do not say "any of the three cities".
 
 Respond ONLY with this JSON:
 {{
   "next_wave_estimate_min": <integer minutes from now, or null if unknown>,
-  "predicted_targets": ["<city name>"],
-  "threat_types_expected": ["<type>"],
-  "recommended_readiness": "<1-2 sentences: which bases to prioritise, refuel, or hold in reserve>",
+  "predicted_targets": ["<specific city name — Arktholm or Valbrek or Nordvik>"],
+  "threat_types_expected": ["<specific type from: Ballistic missile|Cruise missile|Strike aircraft|Fighter jet|Armed drone>"],
+  "predicted_wave_size": <integer 2-7>,
+  "recommended_readiness": "<2 sentences: which specific base(s) to alert and why, and what weapon types to prioritize>",
   "risk_level": "<low|medium|high|critical>",
-  "reasoning": "<1-2 sentences explaining the forecast>"
+  "reasoning": "<2-3 sentences: explain attacker logic, pattern observed, and why you predict this specific target/type>"
 }}"""
 
 
