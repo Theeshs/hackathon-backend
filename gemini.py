@@ -170,8 +170,16 @@ WEAPON MATCHING (cost-effectiveness):
 - armed_drone ($80K): Low-priority armed drone threats only
 - ship_sam ($180K): Any threat within ship SAM range — preferred over aircraft for mid-passage
 
+CROSS-BASE COVERAGE — critical rule:
+If the natural base for a threat's target area shows "OUT OF RANGE / NO ASSETS" or available_count=0,
+that base is DEPLETED and provides zero coverage. Do NOT recommend it. Immediately select the next
+closest base or ship that has available assets. Examples:
+- NVB depleted → Nordvik threats must be covered by HRC or BWP instead
+- HRC depleted → Arktholm/Valbrek threats must be covered by NVB or BWP
+- Never recommend a base with 0 available aircraft — it cannot intercept anything.
+
 ECONOMY OF FORCE — layered defense priority:
-1. Ground defense first: if threat within 100km of a base and ground ammo available → use it ($2K)
+1. Ground defense first: if threat within range of a base and ground ammo available → use it ($2K)
 2. Ship SAM second: if any ship has range → intercept mid-passage ($180K, no sortie cost)
 3. Drone third: low-priority/slow threats only ($3K sortie)
 4. Interceptor: ballistic/cruise missiles requiring speed ($30K sortie)

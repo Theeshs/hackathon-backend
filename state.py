@@ -3,7 +3,7 @@ import time
 
 # ── Human-in-the-loop approval rules ─────────────────────────────────────────
 APPROVAL_RULES = {
-    "confidence_threshold": 55,          # below 55% → human reviews; 55%+ auto-executes
+    "confidence_threshold": 75,          # below 75% → human reviews; keeps most decisions in HOLD
     "civilian_risk_levels": ["high"],    # high civilian risk → human reviews
     "coverage_gap": True,                # CRITICAL gap (city left with zero coverage) → human reviews
 }
@@ -11,7 +11,7 @@ APPROVAL_RULES = {
 pending_approvals = {}   # decision_id -> {decision, threat, reasons, created_at, ...}
 
 
-def check_approval_required(decision: dict, coverage: dict, target_name: str = "") -> tuple:
+def check_approval_required(decision: dict, coverage: dict, target_name: str = "", active_threats: int = 0) -> tuple:
     """Return (requires_approval: bool, reasons: list[str])."""
     reasons = []
     is_capital = target_name == "Arktholm"
@@ -26,6 +26,10 @@ def check_approval_required(decision: dict, coverage: dict, target_name: str = "
     # Skip coverage-gap hold for capital — speed overrides coverage concerns
     if not is_capital and APPROVAL_RULES["coverage_gap"] and coverage.get("gaps"):
         reasons.append(f"Deployment creates coverage gap: {', '.join(coverage['gaps'])}")
+
+    # Multiple simultaneous threats — human should coordinate
+    if active_threats >= 2:
+        reasons.append(f"Mass attack: {active_threats} simultaneous threats — human coordination required")
 
     return len(reasons) > 0, reasons
 
@@ -47,8 +51,8 @@ AIRCRAFT_PROFILES = {
 
 # Naval and ground platform specs
 SHIP_SAM_SPEED_KMH   = 1200   # surface-to-air missile speed
-SHIP_SAM_RANGE_KM    = 220    # max engagement range
-GROUND_DEF_RANGE_KM  = 100    # base ground-based SAM/cannon range
+SHIP_SAM_RANGE_KM    = 350    # max engagement range (SM-2/SM-6 class)
+GROUND_DEF_RANGE_KM  = 300    # Patriot-class SAM: long enough to engage at detection
 GROUND_DEF_SPEED_KMH = 900    # ground SAM engagement speed
 
 # ── Resource economics ────────────────────────────────────────────────────────

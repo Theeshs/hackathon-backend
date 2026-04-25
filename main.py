@@ -248,7 +248,9 @@ def decide(threat: Threat):
 
     # ── Human-in-the-loop gate ────────────────────────────────────────────────
     needs_approval, approval_reasons = check_approval_required(
-        decision, coverage, target_name=threat_dict.get("target_name", "")
+        decision, coverage,
+        target_name=threat_dict.get("target_name", ""),
+        active_threats=len(world_state["active_threats"]),
     )
 
     if needs_approval:
