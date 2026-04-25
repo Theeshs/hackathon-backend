@@ -27,8 +27,8 @@ def check_approval_required(decision: dict, coverage: dict, target_name: str = "
     if not is_capital and APPROVAL_RULES["coverage_gap"] and coverage.get("gaps"):
         reasons.append(f"Deployment creates coverage gap: {', '.join(coverage['gaps'])}")
 
-    # Mass attack (5+) — human should coordinate saturation response
-    if active_threats >= 5:
+    # Mass attack (8+) — only flag truly overwhelming saturation attacks
+    if active_threats >= 8:
         reasons.append(f"Mass attack: {active_threats} simultaneous threats — human coordination required")
 
     return len(reasons) > 0, reasons
