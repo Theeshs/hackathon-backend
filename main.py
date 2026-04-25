@@ -8,8 +8,10 @@ import time
 
 from state import (
     world_state, PROTECTION_TARGETS, AIRCRAFT_PROFILES,
+    WEAPON_COSTS_USD, SORTIE_COSTS_USD, session_costs,
     get_available_assets, deploy_asset, return_asset, auto_return_assets,
     get_state_summary, build_distance_matrix, coverage_assessment, dist_km,
+    get_resource_warnings,
     pending_approvals, check_approval_required, APPROVAL_RULES,
 )
 from gemini import call_gemini, build_decision_prompt, build_iff_prompt, build_forecast_prompt
@@ -91,6 +93,11 @@ def aircraft_status():
                 for a in available
             ],
             "deployed": [{"id": a["id"], "type": a["type"]} for a in deployed],
+            "weapons_inventory": base.get("weapons_inventory", {}),
+            "fuel_stock_liters": base.get("fuel_stock_liters", 0),
+            "fuel_pct": round(base.get("fuel_stock_liters", 0) /
+                              {"NVB": 40000, "HRC": 90000, "BWP": 18000}.get(base["id"], 40000) * 100),
+            "resource_warnings": get_resource_warnings(base),
             "ground_ammo": base["ground_defense"]["ammo"],
         })
     return {"bases": result}

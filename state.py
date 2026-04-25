@@ -39,6 +39,35 @@ AIRCRAFT_PROFILES = {
     "drone":       {"range_km": 300,  "speed_km_h": 300,  "fuel_burn_pct_per_km": 0.04},
 }
 
+# ── Resource economics ────────────────────────────────────────────────────────
+WEAPON_COSTS_USD = {
+    "long_range_missile":  1_500_000,
+    "short_range_missile":   300_000,
+    "cannon":                  2_000,
+    "armed_drone":            80_000,
+    "air_defense":           500_000,
+}
+
+SORTIE_COSTS_USD = {
+    "fighter":     45_000,
+    "interceptor": 30_000,
+    "drone":        3_000,
+}
+
+FUEL_CONSUMPTION_LITERS = {
+    "fighter":     4_000,
+    "interceptor": 3_000,
+    "drone":         300,
+}
+
+# Session-level cost tracker (resets on server restart)
+session_costs = {
+    "total_usd": 0,
+    "sorties": 0,
+    "weapons_fired": {},
+    "fuel_consumed_liters": 0,
+}
+
 def dist_km(x1, y1, x2, y2):
     return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
@@ -62,6 +91,8 @@ world_state = {
                 {"id": "NVB-I1", "type": "interceptor", "status": "available", "fuel_pct": 92,  "weapons": ["short_range_missile", "short_range_missile"]},
                 {"id": "NVB-D1", "type": "drone",       "status": "available", "fuel_pct": 95,  "weapons": ["armed_drone"]},
             ],
+            "weapons_inventory": {"long_range_missile": 4, "short_range_missile": 10, "cannon": 1, "armed_drone": 3},
+            "fuel_stock_liters": 40_000,
             "ground_defense": {"type": "air_defense", "ammo": 8},
         },
         {
@@ -75,6 +106,8 @@ world_state = {
                 {"id": "HRC-D1", "type": "drone",       "status": "available", "fuel_pct": 100, "weapons": ["armed_drone"]},
                 {"id": "HRC-D2", "type": "drone",       "status": "available", "fuel_pct": 76,  "weapons": ["armed_drone"]},
             ],
+            "weapons_inventory": {"long_range_missile": 8, "short_range_missile": 16, "cannon": 2, "armed_drone": 6},
+            "fuel_stock_liters": 90_000,
             "ground_defense": {"type": "air_defense", "ammo": 12},
         },
         {
@@ -85,6 +118,8 @@ world_state = {
                 {"id": "BWP-D1", "type": "drone",       "status": "available", "fuel_pct": 100, "weapons": ["armed_drone"]},
                 {"id": "BWP-D2", "type": "drone",       "status": "available", "fuel_pct": 85,  "weapons": ["armed_drone"]},
             ],
+            "weapons_inventory": {"long_range_missile": 2, "short_range_missile": 6, "cannon": 1, "armed_drone": 4},
+            "fuel_stock_liters": 18_000,
             "ground_defense": {"type": "air_defense", "ammo": 6},
         },
     ],
@@ -110,15 +145,40 @@ def deploy_asset(asset_id, threat_id, weapon):
     for base in world_state["bases"]:
         for asset in base["assets"]:
             if asset["id"] == asset_id:
+                atype = asset["type"]
                 asset["status"] = "deployed"
                 asset["deployed_at"] = time.time()
                 asset["mission_threat"] = threat_id
+
+                # Deduct weapon from per-aircraft loadout
                 if weapon in asset["weapons"]:
                     asset["weapons"].remove(weapon)
+
+                # Deduct from base shared inventory
+                inv = base.get("weapons_inventory", {})
+                if weapon in inv and inv[weapon] > 0:
+                    inv[weapon] -= 1
+
+                # Deduct fuel
+                fuel_used = FUEL_CONSUMPTION_LITERS.get(atype, 0)
+                base["fuel_stock_liters"] = max(0, base.get("fuel_stock_liters", 0) - fuel_used)
+                asset["fuel_pct"] = max(0, asset["fuel_pct"] - AIRCRAFT_PROFILES[atype]["fuel_burn_pct_per_km"] * 300)
+
+                # Track session costs
+                weapon_cost = WEAPON_COSTS_USD.get(weapon, 0)
+                sortie_cost = SORTIE_COSTS_USD.get(atype, 0)
+                total = weapon_cost + sortie_cost
+                session_costs["total_usd"] += total
+                session_costs["sorties"] += 1
+                session_costs["fuel_consumed_liters"] += fuel_used
+                session_costs["weapons_fired"][weapon] = session_costs["weapons_fired"].get(weapon, 0) + 1
+                asset["last_mission_cost_usd"] = total
+
                 world_state["active_deployments"].append({
                     "asset_id": asset_id, "base_id": base["id"],
                     "threat_id": threat_id, "weapon": weapon,
                     "deployed_at": time.time(),
+                    "cost_usd": total,
                 })
                 return True
     return False
@@ -206,12 +266,33 @@ def coverage_assessment(deploying_base_id=None):
     return {"gaps": gaps, "warnings": warnings}
 
 
+def get_resource_warnings(base: dict) -> list:
+    """Flag low-stock resources at a base."""
+    warnings = []
+    inv = base.get("weapons_inventory", {})
+    fuel = base.get("fuel_stock_liters", 0)
+    max_fuel = {"NVB": 40_000, "HRC": 90_000, "BWP": 18_000}.get(base["id"], 40_000)
+    if inv.get("long_range_missile", 0) <= 1:
+        warnings.append("CRITICAL: long range missiles ≤ 1")
+    elif inv.get("long_range_missile", 0) <= 2:
+        warnings.append("LOW: long range missiles ≤ 2")
+    if inv.get("short_range_missile", 0) <= 2:
+        warnings.append("LOW: short range missiles ≤ 2")
+    if fuel / max_fuel < 0.2:
+        warnings.append(f"CRITICAL: fuel at {round(fuel/max_fuel*100)}%")
+    elif fuel / max_fuel < 0.4:
+        warnings.append(f"LOW: fuel at {round(fuel/max_fuel*100)}%")
+    return warnings
+
+
 def get_state_summary():
     auto_return_assets()
     bases = []
     for base in world_state["bases"]:
         available = [a for a in base["assets"] if a["status"] == "available"]
         deployed  = [a for a in base["assets"] if a["status"] == "deployed"]
+        max_fuel  = {"NVB": 40_000, "HRC": 90_000, "BWP": 18_000}.get(base["id"], 40_000)
+        fuel_pct  = round(base.get("fuel_stock_liters", 0) / max_fuel * 100)
         bases.append({
             "id": base["id"], "name": base["name"],
             "x_km": base["x_km"], "y_km": base["y_km"],
@@ -220,13 +301,21 @@ def get_state_summary():
             "assets": [{"id": a["id"], "type": a["type"], "fuel_pct": a["fuel_pct"],
                         "weapons": a["weapons"],
                         "range_km": AIRCRAFT_PROFILES[a["type"]]["range_km"],
-                        "speed_km_h": AIRCRAFT_PROFILES[a["type"]]["speed_km_h"]}
+                        "speed_km_h": AIRCRAFT_PROFILES[a["type"]]["speed_km_h"],
+                        "sortie_cost_usd": SORTIE_COSTS_USD[a["type"]]}
                        for a in available],
+            "weapons_inventory": base.get("weapons_inventory", {}),
+            "fuel_stock_liters": base.get("fuel_stock_liters", 0),
+            "fuel_pct": fuel_pct,
             "ground_ammo": base["ground_defense"]["ammo"],
+            "resource_warnings": get_resource_warnings(base),
         })
     return {
         "bases": bases,
         "active_deployments": len(world_state["active_deployments"]),
         "active_threats": len(world_state["active_threats"]),
         "protection_targets": PROTECTION_TARGETS,
+        "session_costs": session_costs,
+        "weapon_costs_usd": WEAPON_COSTS_USD,
+        "sortie_costs_usd": SORTIE_COSTS_USD,
     }

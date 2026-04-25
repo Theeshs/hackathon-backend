@@ -79,6 +79,19 @@ def build_decision_prompt(threat: dict, state_summary: dict, distance_matrix: di
     tx = threat.get("x_km", threat.get("x", 0))
     ty = threat.get("y_km", threat.get("y", 0))
 
+    session = state_summary.get("session_costs", {})
+    session_cost_str = f"${session.get('total_usd', 0):,.0f} across {session.get('sorties', 0)} sorties"
+
+    resource_lines = []
+    for b in state_summary.get("bases", []):
+        inv = b.get("weapons_inventory", {})
+        inv_str = ", ".join(f"{k.replace('_',' ')}: {v}" for k, v in inv.items() if v > 0)
+        warnings = b.get("resource_warnings", [])
+        warn_str = f" ⚠ {'; '.join(warnings)}" if warnings else ""
+        resource_lines.append(
+            f"  {b['id']}: fuel {b.get('fuel_pct',0)}% ({b.get('fuel_stock_liters',0):,}L) | {inv_str}{warn_str}"
+        )
+
     return f"""You are the AI decision support system for NORTHERN COMMAND air defense.
 
 INCOMING THREAT:
@@ -100,12 +113,30 @@ BASE ASSET DETAILS:
 
 Active deployments: {state_summary['active_deployments']} | Active threats: {state_summary['active_threats']}
 
-Select the optimal base AND asset type. Rules:
-- Fighter: best for Strike aircraft, Fighter jet — long range (700km), heavy weapons, air-combat capable
-- Interceptor: best for Ballistic missile, Cruise missile — fastest (1800km/h), short-range missiles
-- Drone: Armed drone or low-priority/slow threats only — limited range (300km), lowest risk to manned assets
-- If the fastest option leaves a coverage gap, choose the next-best that preserves coverage
-- Prefer fighters over interceptors when the threat is an aircraft type — interceptors waste their speed advantage on slow targets
+RESOURCE STATUS (inventory · fuel · warnings):
+{chr(10).join(resource_lines)}
+
+SESSION COSTS SO FAR: {session_cost_str}
+
+Select the optimal base, asset type, AND weapon. Apply economy-of-force principles:
+
+ASSET MATCHING:
+- Fighter: Strike aircraft, Fighter jet — air combat, long range (700km), can carry LRM
+- Interceptor: Ballistic missile, Cruise missile — fastest (1800km/h), short-range missiles
+- Drone: Armed drone threats, low-priority only — do NOT use for ballistic or aircraft threats
+
+WEAPON MATCHING (cost-effectiveness):
+- long_range_missile ($1.5M): Ballistic missile, long-range cruise missile — justified by threat value
+- short_range_missile ($300K): Most aircraft and slow threats within 200km
+- cannon ($2K): Low-speed targets only (armed drones, slow aircraft) — preserve missiles
+- armed_drone ($80K): Low-priority armed drone threats — cheapest counter
+
+ECONOMY OF FORCE — always consider:
+1. Is the weapon cost proportionate to the threat? Don't fire a $1.5M missile at an armed drone.
+2. Check inventory: if a base has ≤ 2 LRMs, avoid using them unless no alternative exists.
+3. Check fuel: if base fuel < 30%, prefer drones or ground defense to preserve manned sorties.
+4. Session cost context: total spent so far — factor in sustainability.
+5. If a cheaper option can intercept, use it; preserve high-value weapons for high-value threats.
 
 Respond ONLY with this JSON object:
 {{
@@ -114,14 +145,16 @@ Respond ONLY with this JSON object:
   "recommended_asset_type": "<fighter|interceptor|drone>",
   "recommended_weapon": "<long_range_missile|short_range_missile|cannon|armed_drone|air_defense>",
   "confidence": <0-100>,
-  "reasoning": "<2-3 sentences: why this base, what distance/time/coverage drove the choice>",
+  "reasoning": "<2-3 sentences: why this base, asset type, AND weapon — include cost rationale>",
   "alternatives_rejected": [
-    {{"base": "<id>", "reason": "<specific: out of range / no assets / slower response / coverage risk>"}}
+    {{"base": "<id>", "reason": "<specific: out of range / no assets / slower / coverage risk / resource concern>"}}
   ],
-  "trade_offs": "<1-2 sentences: what was sacrificed — coverage, speed, fuel, future capacity>",
+  "trade_offs": "<1-2 sentences: cost vs effectiveness vs coverage vs sustainability>",
+  "estimated_cost_usd": <integer: sortie cost + weapon cost>,
+  "cost_rationale": "<1 sentence: why this cost level is proportionate or necessary>",
   "civilian_risk": "<none|low|medium|high>",
   "civilian_note": "<relevant note or empty string>",
-  "future_risk": "<1-2 sentences: wave risk, coverage gaps after this deployment>",
+  "future_risk": "<1-2 sentences: wave risk, resource depletion risk, coverage after deployment>",
   "alternative_base": "<backup base ID>",
   "priority": "<immediate|urgent|monitor>"
 }}"""
