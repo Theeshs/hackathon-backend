@@ -48,22 +48,42 @@ def call_gemini(prompt: str) -> dict:
 def build_decision_prompt(threat: dict, state_summary: dict, distance_matrix: dict, coverage: dict) -> str:
     base_lines = []
     for bid, info in distance_matrix.items():
+        is_ship = info.get("platform_type") == "ship"
         if info["can_intercept"]:
             opts = []
             for atype, opt in info["options"].items():
                 weapons_str = ", ".join(opt["weapons"]).replace("_", " ")
-                opts.append(
-                    f"{atype} ({opt['response_min']}min, {opt['range_km']}km range, "
-                    f"{opt['fuel_pct']}% fuel, weapons: {weapons_str})"
-                )
+                if atype == "ship_sam":
+                    opts.append(
+                        f"ship_sam ({opt['response_min']}min, {opt['range_km']}km range, "
+                        f"{opt['sam_count']} SAMs remaining, cost $180K/shot)"
+                    )
+                elif atype == "ground_defense":
+                    opts.append(
+                        f"ground_defense ({opt['response_min']}min, {opt['range_km']}km range, "
+                        f"{opt['ammo']} rounds, cost $2K/shot)"
+                    )
+                else:
+                    opts.append(
+                        f"{atype} ({opt['response_min']}min, {opt['range_km']}km range, "
+                        f"{opt.get('fuel_pct','?')}% fuel, weapons: {weapons_str})"
+                    )
             opts_str = " | ".join(opts)
         else:
             opts_str = "OUT OF RANGE / NO ASSETS"
-        base_lines.append(
-            f"  {bid} ({info['name']}): {info['distance_km']} km away | "
-            f"{info['available_count']} aircraft available\n"
-            f"    Options: {opts_str}"
-        )
+
+        if is_ship:
+            base_lines.append(
+                f"  {bid} [{info['name']}] NAVAL: {info['distance_km']} km away | "
+                f"{info['available_count']} SAMs remaining\n"
+                f"    Options: {opts_str}"
+            )
+        else:
+            base_lines.append(
+                f"  {bid} ({info['name']}): {info['distance_km']} km away | "
+                f"{info['available_count']} aircraft available\n"
+                f"    Options: {opts_str}"
+            )
 
     coverage_lines = ""
     if coverage["gaps"]:
@@ -128,34 +148,43 @@ CONFIDENCE SCORING — be realistic, not optimistic. Start at 100 then subtract:
 - 2 or more active threats simultaneously: -10 (resource contention)
 - Weapon is a suboptimal match for threat type: -10 (effectiveness uncertainty)
 - No clear single best option (multiple bases tied): -10
-Reserve 90–100% ONLY when there is a single unambiguous option with no alternatives, full fuel, no civilians, and no coverage risk. Most decisions should score 55–80%.
+Reserve 90–100% ONLY for a single unambiguous option with no alternatives and no risk factors. Typical decisions should score 60–80%. Only score below 40% when genuinely uncertain (multiple equally valid options, contradictory constraints, or missing critical data).
 
 Select the optimal base, asset type, AND weapon. Apply economy-of-force principles:
 
-ASSET MATCHING:
-- Fighter: Strike aircraft, Fighter jet — air combat, long range (700km), can carry LRM
-- Interceptor: Ballistic missile, Cruise missile — fastest (1800km/h), short-range missiles
-- Drone: Armed drone threats, low-priority only — do NOT use for ballistic or aircraft threats
+ASSET MATCHING — choose the right platform AND weapon:
+- Fighter: Strike aircraft, Fighter jet — air combat, long range (700km), carries LRM/SRM
+- Interceptor: Ballistic missile, Cruise missile — fastest (1800km/h), carries SRM
+- Drone: Armed drone threats, low-priority only — do NOT use against ballistic or aircraft
+- ship_sam ($180K): Threat within 220km of a ship — NO sortie cost, 1200km/h SAM.
+    Ideal for mid-passage intercept. Use if any ship has range.
+- ship_ciws ($500/burst): Threat within 15km of a ship — automatic close-in gun system.
+    Cheapest option for any threat that has penetrated to ship proximity.
+- ground_defense ($2K/shot): Threat within 100km of a base — ground-based gun/SAM, no sortie cost.
+    ALWAYS check this first. NVB can engage Nordvik threats, HRC can engage Arktholm threats.
 
 WEAPON MATCHING (cost-effectiveness):
-- long_range_missile ($1.5M): Ballistic missile, long-range cruise missile — justified by threat value
-- short_range_missile ($300K): Most aircraft and slow threats within 200km
-- cannon ($2K): Low-speed targets only (armed drones, slow aircraft) — preserve missiles
-- armed_drone ($80K): Low-priority armed drone threats — cheapest counter
+- long_range_missile ($1.5M): Ballistic missile, long-range cruise missile only
+- short_range_missile ($300K): Aircraft and fast threats within 200km
+- cannon/ground_cannon ($2K): Low-speed targets within 100km — always prefer over missiles
+- armed_drone ($80K): Low-priority armed drone threats only
+- ship_sam ($180K): Any threat within ship SAM range — preferred over aircraft for mid-passage
 
-ECONOMY OF FORCE — always consider:
-1. Is the weapon cost proportionate to the threat? Don't fire a $1.5M missile at an armed drone.
-2. Check inventory: if a base has ≤ 2 LRMs, avoid using them unless no alternative exists.
-3. Check fuel: if base fuel < 30%, prefer drones or ground defense to preserve manned sorties.
-4. Session cost context: total spent so far — factor in sustainability.
-5. If a cheaper option can intercept, use it; preserve high-value weapons for high-value threats.
+ECONOMY OF FORCE — layered defense priority:
+1. Ground defense first: if threat within 100km of a base and ground ammo available → use it ($2K)
+2. Ship SAM second: if any ship has range → intercept mid-passage ($180K, no sortie cost)
+3. Drone third: low-priority/slow threats only ($3K sortie)
+4. Interceptor: ballistic/cruise missiles requiring speed ($30K sortie)
+5. Fighter: aircraft threats or when nothing else has range ($45K sortie)
+6. Never fire a $1.5M LRM at an armed drone. Never scramble a fighter for a drone.
+7. If base fuel < 30%, prefer ship SAM or ground defense to preserve manned sortie capability.
 
 Respond ONLY with this JSON object:
 {{
-  "recommended_base": "<NVB|HRC|BWP>",
+  "recommended_base": "<NVB|HRC|BWP|SNS-1|SNS-2|SNS-3>",
   "recommended_base_name": "<full name>",
-  "recommended_asset_type": "<fighter|interceptor|drone>",
-  "recommended_weapon": "<long_range_missile|short_range_missile|cannon|armed_drone|air_defense>",
+  "recommended_asset_type": "<fighter|interceptor|drone|ship_sam|ship_ciws|ground_defense>",
+  "recommended_weapon": "<long_range_missile|short_range_missile|cannon|armed_drone|ship_sam|ship_ciws|ground_cannon>",
   "confidence": <0-100>,
   "reasoning": "<2-3 sentences: why this base, asset type, AND weapon — include cost rationale>",
   "alternatives_rejected": [

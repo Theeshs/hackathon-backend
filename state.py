@@ -3,24 +3,30 @@ import time
 
 # ── Human-in-the-loop approval rules ─────────────────────────────────────────
 APPROVAL_RULES = {
-    "confidence_threshold": 60,          # below 60% confidence → human reviews
+    "confidence_threshold": 55,          # below 55% → human reviews; 55%+ auto-executes
     "civilian_risk_levels": ["high"],    # high civilian risk → human reviews
-    "coverage_gap": True,                # deployment creating a coverage gap → human reviews
+    "coverage_gap": True,                # CRITICAL gap (city left with zero coverage) → human reviews
 }
 
 pending_approvals = {}   # decision_id -> {decision, threat, reasons, created_at, ...}
 
 
-def check_approval_required(decision: dict, coverage: dict) -> tuple:
+def check_approval_required(decision: dict, coverage: dict, target_name: str = "") -> tuple:
     """Return (requires_approval: bool, reasons: list[str])."""
     reasons = []
+    is_capital = target_name == "Arktholm"
+
     conf = decision.get("confidence", 100)
     if conf < APPROVAL_RULES["confidence_threshold"]:
         reasons.append(f"AI confidence {conf}% below threshold ({APPROVAL_RULES['confidence_threshold']}%)")
+
     if decision.get("civilian_risk") in APPROVAL_RULES["civilian_risk_levels"]:
         reasons.append(f"Civilian risk level: {decision['civilian_risk']}")
-    if APPROVAL_RULES["coverage_gap"] and coverage.get("gaps"):
+
+    # Skip coverage-gap hold for capital — speed overrides coverage concerns
+    if not is_capital and APPROVAL_RULES["coverage_gap"] and coverage.get("gaps"):
         reasons.append(f"Deployment creates coverage gap: {', '.join(coverage['gaps'])}")
+
     return len(reasons) > 0, reasons
 
 
@@ -39,6 +45,12 @@ AIRCRAFT_PROFILES = {
     "drone":       {"range_km": 300,  "speed_km_h": 300,  "fuel_burn_pct_per_km": 0.04},
 }
 
+# Naval and ground platform specs
+SHIP_SAM_SPEED_KMH   = 1200   # surface-to-air missile speed
+SHIP_SAM_RANGE_KM    = 220    # max engagement range
+GROUND_DEF_RANGE_KM  = 100    # base ground-based SAM/cannon range
+GROUND_DEF_SPEED_KMH = 900    # ground SAM engagement speed
+
 # ── Resource economics ────────────────────────────────────────────────────────
 WEAPON_COSTS_USD = {
     "long_range_missile":  1_500_000,
@@ -46,12 +58,17 @@ WEAPON_COSTS_USD = {
     "cannon":                  2_000,
     "armed_drone":            80_000,
     "air_defense":           500_000,
+    "ship_sam":              180_000,
+    "ship_ciws":                 500,   # cheap per burst — auto gun
+    "ground_cannon":           2_000,
 }
 
 SORTIE_COSTS_USD = {
-    "fighter":     45_000,
-    "interceptor": 30_000,
-    "drone":        3_000,
+    "fighter":       45_000,
+    "interceptor":   30_000,
+    "drone":          3_000,
+    "ship_sam":           0,   # no sortie cost — crew already deployed
+    "ground_defense":     0,   # no sortie cost
 }
 
 FUEL_CONSUMPTION_LITERS = {
@@ -121,6 +138,29 @@ world_state = {
             "weapons_inventory": {"long_range_missile": 2, "short_range_missile": 6, "cannon": 1, "armed_drone": 4},
             "fuel_stock_liters": 18_000,
             "ground_defense": {"type": "air_defense", "ammo": 6},
+        },
+    ],
+    "ships": [
+        {
+            "id": "SNS-1", "name": "SNS Ironclad",
+            "x_km": 180.0, "y_km": 700.0,      # west Boreal Passage
+            "sam_count": 12, "sam_range_km": SHIP_SAM_RANGE_KM,
+            "ciws_rounds": 200, "ciws_range_km": 15,   # close-in gun system
+            "status": "active",
+        },
+        {
+            "id": "SNS-2", "name": "SNS Resolute",
+            "x_km": 700.0, "y_km": 670.0,      # centre passage
+            "sam_count": 10, "sam_range_km": SHIP_SAM_RANGE_KM,
+            "ciws_rounds": 200, "ciws_range_km": 15,
+            "status": "active",
+        },
+        {
+            "id": "SNS-3", "name": "SNS Vigilant",
+            "x_km": 1250.0, "y_km": 640.0,     # east passage
+            "sam_count": 8,  "sam_range_km": SHIP_SAM_RANGE_KM,
+            "ciws_rounds": 200, "ciws_range_km": 15,
+            "status": "active",
         },
     ],
     "active_threats": [],
@@ -213,13 +253,53 @@ def auto_return_assets(mission_duration_s=180):
         return_asset(aid)
 
 
+def deploy_ship_sam(ship_id: str, threat_id: str, weapon: str = "ship_sam") -> bool:
+    for ship in world_state["ships"]:
+        if ship["id"] == ship_id and ship["status"] == "active":
+            if weapon == "ship_ciws":
+                if ship.get("ciws_rounds", 0) <= 0:
+                    return False
+                ship["ciws_rounds"] -= 50   # burst of rounds
+            else:
+                if ship["sam_count"] <= 0:
+                    return False
+                ship["sam_count"] -= 1
+            cost = WEAPON_COSTS_USD.get(weapon, WEAPON_COSTS_USD["ship_sam"])
+            session_costs["total_usd"] += cost
+            session_costs["weapons_fired"][weapon] = session_costs["weapons_fired"].get(weapon, 0) + 1
+            world_state["active_deployments"].append({
+                "asset_id": ship_id, "base_id": ship_id,
+                "threat_id": threat_id, "weapon": weapon,
+                "deployed_at": time.time(), "cost_usd": cost,
+            })
+            return True
+    return False
+
+
+def deploy_ground_defense(base_id: str, threat_id: str) -> bool:
+    for base in world_state["bases"]:
+        if base["id"] == base_id and base["ground_defense"]["ammo"] > 0:
+            base["ground_defense"]["ammo"] -= 1
+            cost = WEAPON_COSTS_USD["ground_cannon"]
+            session_costs["total_usd"] += cost
+            session_costs["weapons_fired"]["ground_cannon"] = session_costs["weapons_fired"].get("ground_cannon", 0) + 1
+            world_state["active_deployments"].append({
+                "asset_id": f"{base_id}-GND", "base_id": base_id,
+                "threat_id": threat_id, "weapon": "ground_cannon",
+                "deployed_at": time.time(), "cost_usd": cost,
+            })
+            return True
+    return False
+
+
 def build_distance_matrix(tx, ty):
     matrix = {}
+
+    # ── Air bases ─────────────────────────────────────────────────────────────
     for base in world_state["bases"]:
         d = dist_km(base["x_km"], base["y_km"], tx, ty)
         available = [a for a in base["assets"] if a["status"] == "available"]
 
-        # Build per-type option — best (highest-fuel) asset of each type that can intercept
         by_type = {}
         for a in available:
             atype = a["type"]
@@ -236,13 +316,72 @@ def build_distance_matrix(tx, ty):
                         "asset_id": a["id"],
                     }
 
+        # Ground defense option — if threat is within range and ammo available
+        gd = base["ground_defense"]
+        if gd["ammo"] > 0 and d <= GROUND_DEF_RANGE_KM:
+            rt_gd = round(d / GROUND_DEF_SPEED_KMH * 60, 1)
+            by_type["ground_defense"] = {
+                "type": "ground_defense",
+                "response_min": rt_gd,
+                "ammo": gd["ammo"],
+                "range_km": GROUND_DEF_RANGE_KM,
+                "speed_km_h": GROUND_DEF_SPEED_KMH,
+                "weapons": ["ground_cannon"],
+                "asset_id": f"{base['id']}-GND",
+            }
+
         matrix[base["id"]] = {
             "name": base["name"],
             "distance_km": round(d, 1),
             "available_count": len(available),
+            "ground_ammo": gd["ammo"],
             "can_intercept": len(by_type) > 0,
-            "options": by_type,   # keyed by type: fighter / interceptor / drone
+            "options": by_type,
         }
+
+    # ── Naval ships ───────────────────────────────────────────────────────────
+    for ship in world_state["ships"]:
+        if ship["status"] != "active":
+            continue
+        d = dist_km(ship["x_km"], ship["y_km"], tx, ty)
+        ship_opts = {}
+
+        # SAM option — medium range
+        if ship["sam_count"] > 0 and d <= ship["sam_range_km"]:
+            rt = round(d / SHIP_SAM_SPEED_KMH * 60, 1)
+            ship_opts["ship_sam"] = {
+                "type": "ship_sam",
+                "response_min": rt,
+                "sam_count": ship["sam_count"],
+                "range_km": ship["sam_range_km"],
+                "speed_km_h": SHIP_SAM_SPEED_KMH,
+                "weapons": ["ship_sam"],
+                "asset_id": ship["id"],
+            }
+
+        # CIWS option — very close range, automatic gun
+        ciws_range = ship.get("ciws_range_km", 15)
+        if ship.get("ciws_rounds", 0) > 0 and d <= ciws_range:
+            ship_opts["ship_ciws"] = {
+                "type": "ship_ciws",
+                "response_min": round(d / 900 * 60, 1),
+                "ciws_rounds": ship["ciws_rounds"],
+                "range_km": ciws_range,
+                "speed_km_h": 900,
+                "weapons": ["ship_ciws"],
+                "asset_id": ship["id"],
+            }
+
+        if ship_opts:
+            matrix[ship["id"]] = {
+                "name": ship["name"],
+                "distance_km": round(d, 1),
+                "available_count": ship["sam_count"],
+                "can_intercept": True,
+                "platform_type": "ship",
+                "options": ship_opts,
+            }
+
     return matrix
 
 
@@ -310,8 +449,14 @@ def get_state_summary():
             "ground_ammo": base["ground_defense"]["ammo"],
             "resource_warnings": get_resource_warnings(base),
         })
+    ships = [
+        {"id": s["id"], "name": s["name"], "x_km": s["x_km"], "y_km": s["y_km"],
+         "sam_count": s["sam_count"], "sam_range_km": s["sam_range_km"], "status": s["status"]}
+        for s in world_state["ships"]
+    ]
     return {
         "bases": bases,
+        "ships": ships,
         "active_deployments": len(world_state["active_deployments"]),
         "active_threats": len(world_state["active_threats"]),
         "protection_targets": PROTECTION_TARGETS,

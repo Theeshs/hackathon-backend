@@ -11,7 +11,7 @@ from state import (
     WEAPON_COSTS_USD, SORTIE_COSTS_USD, session_costs,
     get_available_assets, deploy_asset, return_asset, auto_return_assets,
     get_state_summary, build_distance_matrix, coverage_assessment, dist_km,
-    get_resource_warnings,
+    get_resource_warnings, deploy_ship_sam, deploy_ground_defense,
     pending_approvals, check_approval_required, APPROVAL_RULES,
 )
 from gemini import call_gemini, build_decision_prompt, build_iff_prompt, build_forecast_prompt
@@ -125,11 +125,23 @@ def get_distances():
 
 def _execute_deployment(decision: dict, threat_dict: dict) -> Optional[str]:
     """Deploy the asset specified in decision. Returns asset_id or None."""
-    base_id = decision.get("recommended_base")
-    if not base_id:
+    asset_type = decision.get("recommended_asset_type", "")
+    platform_id = decision.get("recommended_base")
+    if not platform_id:
         return None
-    candidates = get_available_assets(base_id)
-    preferred = [a for a in candidates if a["type"] == decision.get("recommended_asset_type")]
+
+    # Ship SAM or CIWS intercept
+    if asset_type in ("ship_sam", "ship_ciws"):
+        return platform_id if deploy_ship_sam(platform_id, threat_dict["id"], asset_type) else None
+
+    # Ground-based defense
+    if asset_type == "ground_defense":
+        base_id = platform_id.replace("-GND", "")
+        return f"{base_id}-GND" if deploy_ground_defense(base_id, threat_dict["id"]) else None
+
+    # Aircraft (fighter / interceptor / drone)
+    candidates = get_available_assets(platform_id)
+    preferred = [a for a in candidates if a["type"] == asset_type]
     chosen = (preferred or candidates or [None])[0]
     if chosen:
         deploy_asset(chosen["id"], threat_dict["id"], decision.get("recommended_weapon", ""))
@@ -210,10 +222,34 @@ def decide(threat: Threat):
                 "priority": "urgent",
             }
 
+    # ── Arktholm hard override — enforce regardless of what Gemini returned ──
+    if threat_dict.get("target_name") == "Arktholm":
+        decision["priority"] = "immediate"
+        # Pick fastest available asset for Arktholm if Gemini chose a slower one
+        fastest_base, fastest_time = None, 999
+        for bid, info in distance_matrix.items():
+            for atype, opt in info.get("options", {}).items():
+                if opt["response_min"] < fastest_time:
+                    fastest_time = opt["response_min"]
+                    fastest_base = bid
+                    fastest_type = atype
+        if fastest_base and fastest_base != decision.get("recommended_base"):
+            decision["recommended_base"] = fastest_base
+            decision["recommended_base_name"] = next(
+                (b["name"] for b in world_state["bases"] if b["id"] == fastest_base), fastest_base
+            )
+            decision["recommended_asset_type"] = fastest_type
+            decision["reasoning"] = (
+                f"[CAPITAL OVERRIDE] Arktholm is under threat — fastest intercept selected. "
+                + decision.get("reasoning", "")
+            )
+
     decision_id = f"D{str(uuid.uuid4())[:6].upper()}"
 
     # ── Human-in-the-loop gate ────────────────────────────────────────────────
-    needs_approval, approval_reasons = check_approval_required(decision, coverage)
+    needs_approval, approval_reasons = check_approval_required(
+        decision, coverage, target_name=threat_dict.get("target_name", "")
+    )
 
     if needs_approval:
         pending_approvals[decision_id] = {
