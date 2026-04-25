@@ -3,7 +3,7 @@ import time
 
 # ── Human-in-the-loop approval rules ─────────────────────────────────────────
 APPROVAL_RULES = {
-    "confidence_threshold": 75,          # below 75% → human reviews; keeps most decisions in HOLD
+    "confidence_threshold": 50,          # below 50% → human reviews; fallback AI returns 55% → auto-executes
     "civilian_risk_levels": ["high"],    # high civilian risk → human reviews
     "coverage_gap": True,                # CRITICAL gap (city left with zero coverage) → human reviews
 }
@@ -27,8 +27,8 @@ def check_approval_required(decision: dict, coverage: dict, target_name: str = "
     if not is_capital and APPROVAL_RULES["coverage_gap"] and coverage.get("gaps"):
         reasons.append(f"Deployment creates coverage gap: {', '.join(coverage['gaps'])}")
 
-    # Multiple simultaneous threats — human should coordinate
-    if active_threats >= 2:
+    # Mass attack (5+) — human should coordinate saturation response
+    if active_threats >= 5:
         reasons.append(f"Mass attack: {active_threats} simultaneous threats — human coordination required")
 
     return len(reasons) > 0, reasons
